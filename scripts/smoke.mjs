@@ -11,6 +11,7 @@ try {
   const page = await app.firstWindow();
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.waitForSelector('#engine-status:text("Engine ready")');
+  await page.waitForTimeout(500); // Capture the fully visible page after its entrance animation.
   await page.screenshot({ path: 'docs/screenshots/downloader.png' });
   await page.getByRole('button', { name: 'Audio only', exact: true }).click();
   await page.locator('#audio-format').selectOption('mp3');
@@ -22,6 +23,9 @@ try {
   await page.locator('#link-error').waitFor({ state: 'visible' });
   assert.match(await page.locator('#link-error').textContent(), /YouTube and TikTok/);
   await page.locator('[data-page="settings"]').click();
+  await page.locator('#fragments').selectOption('8');
+  await page.waitForFunction(async () => (await window.anyloader.state()).settings.fragments === 8);
+  await page.locator('#fragments').selectOption('4');
   await page.locator('#concurrent').selectOption('3');
   await page.waitForFunction(() => document.querySelector('#toast').textContent === 'Preferences saved.');
   const state = await page.evaluate(() => window.anyloader.state());

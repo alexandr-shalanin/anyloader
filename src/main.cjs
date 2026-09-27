@@ -1,34 +1,43 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Notification, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Notification, nativeImage, powerSaveBlocker } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { validateURL, validateOptions, downloadArgs, parseProgress } = require('./core.cjs');
+const { audioOptions, extractAudio } = require('./local-media.cjs');
 app.setName('AnyLoader');
 const customData = process.argv.find(a => a.startsWith('--data-dir='))?.slice(11);
 if (customData) app.setPath('userData', path.resolve(customData));
-let win, store, saveTimer, quitting = false;
+let win, store, saveTimer, emitTimer, sleepBlocker, quitting = false;
 const running = new Map(), probes = new Set(), metadataCache = new Map();
 const binDir = app.isPackaged ? path.join(process.resourcesPath, 'vendor') : path.join(__dirname, '../vendor');
 const storePath = () => path.join(app.getPath('userData'), 'library.json');
 const rendererURL = pathToFileURL(path.join(__dirname, 'renderer/index.html')).href;
 function save() {
   clearTimeout(saveTimer);
+  saveTimer = null;
   fs.mkdirSync(path.dirname(storePath()), { recursive: true });
   fs.writeFileSync(`${storePath()}.tmp`, JSON.stringify(store, null, 2));
   fs.renameSync(`${storePath()}.tmp`, storePath());
 }
-function emit() {
+function publish() {
+  emitTimer = null;
   if (win && !win.isDestroyed()) win.webContents.send('state', snapshot());
-  clearTimeout(saveTimer); saveTimer = setTimeout(save, 300);
   app.dock?.setBadge(running.size ? String(running.size) : '');
   const active = store.jobs.filter(j => running.has(j.id));
   win?.setProgressBar(active.length ? active.reduce((s, j) => s + j.progress / 100, 0) / active.length : -1);
+  if (running.size && sleepBlocker === undefined) sleepBlocker = powerSaveBlocker.start('prevent-app-suspension');
+  if (!running.size && sleepBlocker !== undefined) { powerSaveBlocker.stop(sleepBlocker); sleepBlocker = undefined; }
+}
+function emit(immediate = true) {
+  if (immediate) { clearTimeout(emitTimer); publish(); }
+  else if (!emitTimer) emitTimer = setTimeout(publish, 200);
+  if (!saveTimer) saveTimer = setTimeout(save, 2000);
 }
 function snapshot() { return { ...store, engine: ['yt-dlp', 'ffmpeg', 'ffprobe', 'deno'].every(tool => fs.existsSync(path.join(binDir, tool))), version: app.getVersion(), toolVersion: (() => { try { return JSON.parse(fs.readFileSync(path.join(binDir, 'versions.json'))).ytDlp; } catch { return 'unavailable'; } })() }; }
 function baseArgs() {
-  const args = ['--ignore-config', '--no-plugin-dirs', '--no-playlist', '--socket-timeout', '25', '--retries', '3', '--ffmpeg-location', path.join(binDir, 'ffmpeg'), '--js-runtimes', `deno:${path.join(binDir, 'deno')}`];
+  const args = ['--ignore-config', '--no-plugin-dirs', '--no-playlist', '--socket-timeout', '25', '--retries', '10', '--fragment-retries', '10', '--retry-sleep', 'http:exp=1:10', '--retry-sleep', 'fragment:exp=1:10', '--concurrent-fragments', String(store.settings.fragments || 4), '--ffmpeg-location', path.join(binDir, 'ffmpeg'), '--js-runtimes', `deno:${path.join(binDir, 'deno')}`];
   if (['chrome', 'firefox', 'safari', 'edge'].includes(store.settings.cookies)) args.push('--cookies-from-browser', store.settings.cookies);
   return args;
 }
@@ -37,7 +46,12 @@ function launch(args) {
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   return child;
 }
-function terminate(child) { try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); } }
+function terminate(child) {
+  if (child.cancel) return child.cancel();
+  try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+  const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 2000);
+  child.once('close', () => clearTimeout(timer));
+}
 function readableError(raw) {
   const text = raw.replace(/\x1b\[[0-9;]*m/g, '').trim();
   const errors = text.split('\n').filter(s => /ERROR:/.test(s));
@@ -81,6 +95,7 @@ function schedule() {
   emit();
 }
 function startJob(job) {
+  if (job.type === 'extraction') return startExtraction(job);
   job.status = 'downloading'; job.error = ''; job.stage = 'Connecting'; job.speed = 0;
   fs.mkdirSync(job.folder, { recursive: true });
   const child = launch([...baseArgs(), ...downloadArgs(job, job.folder)]);
@@ -89,9 +104,20 @@ function startJob(job) {
   const line = text => {
     const progress = parseProgress(text);
     if (progress) Object.assign(job, progress);
+    if (text.startsWith('__META__')) {
+      try {
+        const meta = JSON.parse(text.slice(8));
+        job.title = String(meta.title || job.title);
+        job.author = meta.author === 'NA' ? '' : String(meta.author || '');
+        job.duration = Number(meta.duration) || 0;
+        job.height = Number(meta.height) || 0;
+        job.thumbnail = /^https:\/\//.test(meta.thumbnail || '') ? meta.thumbnail : '';
+        job.stage = 'Downloading';
+      } catch {}
+    }
     if (text.startsWith('__FILE__')) { try { outputFile = JSON.parse(text.slice(8)); } catch {} }
     if (/\[(Merger|ExtractAudio|Metadata|VideoRemuxer)\]/.test(text)) job.stage = 'Processing media';
-    emit();
+    emit(false);
   };
   child.stdout.on('data', data => { buf += data.toString(); const lines = buf.split(/\r?\n/); buf = lines.pop(); lines.forEach(line); });
   child.stderr.on('data', b => { err = (err + b).slice(-16000); });
@@ -104,11 +130,27 @@ function startJob(job) {
         job.status = 'completed'; job.progress = 100; job.file = outputFile; job.completedAt = Date.now(); job.stage = 'Saved';
         job.size = fs.statSync(outputFile).size;
         if (store.settings.notifications && Notification.isSupported()) new Notification({ title: 'Your download is ready', body: job.title, silent: true }).show();
-      } else { job.status = 'failed'; job.error = failure || readableError(err); job.stage = 'Needs attention'; }
+      } else {
+        job.status = 'failed'; job.error = failure || readableError(err); job.stage = 'Needs attention';
+        if (job.options.container === 'mp4' && /Requested format is not available/.test(job.error)) job.error = 'This video does not offer H.264/AAC at the selected quality. Choose Original quality or a different resolution and try again.';
+      }
     }
     job.speed = 0; save(); schedule();
   }
   child.on('error', e => finish(-1, e.message)); child.on('close', code => finish(code));
+}
+function startExtraction(job) {
+  job.status = 'downloading'; job.stage = 'Reading saved video'; job.error = ''; job.progress = 0;
+  const controller = new AbortController();
+  running.set(job.id, { cancel: () => controller.abort() });
+  extractAudio({ binDir, job, signal: controller.signal, onProgress: progress => { Object.assign(job, progress); emit(false); } })
+    .then(result => {
+      if (job.status !== 'downloading') return;
+      Object.assign(job, result, { status: 'completed', progress: 100, stage: 'Saved', completedAt: Date.now() });
+      if (store.settings.notifications && Notification.isSupported()) new Notification({ title: 'Your audio is ready', body: job.title, silent: true }).show();
+    })
+    .catch(error => { if (job.status === 'downloading') Object.assign(job, { status: 'failed', stage: 'Needs attention', error: error.message }); })
+    .finally(() => { running.delete(job.id); save(); schedule(); });
 }
 function handle(name, fn) { ipcMain.handle(name, async (event, ...args) => {
   if (event.sender !== win?.webContents || event.senderFrame.url !== rendererURL) throw new Error('Untrusted request.');
@@ -118,18 +160,39 @@ function registerIPC() {
   handle('state', snapshot);
   handle('clipboard', () => clipboard.readText().slice(0, 4096));
   handle('inspect', inspect);
-  handle('enqueue', async (input, options) => {
-    const url = validateURL(input);
-    if (store.jobs.some(j => j.url === url && ['queued', 'downloading'].includes(j.status) && JSON.stringify(j.options) === JSON.stringify(validateOptions(options)))) throw new Error('This download is already in your queue.');
-    const info = await inspect(url);
+  handle('enqueue', (input, options) => {
+    if (typeof input !== 'string' || input.length > 82000) throw new Error('Paste up to 20 video links.');
+    const lines = input.trim().split(/\s+/);
+    if (lines.length > 20) throw new Error('Add up to 20 links at a time.');
+    const urls = [...new Set(lines.map(validateURL))];
+    const selected = validateOptions(options);
     if (quitting) throw new Error('AnyLoader is closing. Try again after reopening.');
-    if (store.jobs.some(j => j.url === url && ['queued', 'downloading'].includes(j.status) && JSON.stringify(j.options) === JSON.stringify(validateOptions(options)))) throw new Error('This download is already in your queue.');
-    const job = { ...info, id: crypto.randomUUID(), options: validateOptions(options), folder: store.settings.folder, status: 'queued', progress: 0, createdAt: Date.now(), stage: 'Waiting' };
+    const ids = [];
+    for (const url of urls) {
+      if (store.jobs.some(j => j.type !== 'extraction' && j.url === url && ['queued', 'downloading', 'paused'].includes(j.status) && JSON.stringify(j.options) === JSON.stringify(selected))) continue;
+      const cached = metadataCache.get(`${store.settings.cookies}:${url}`)?.info;
+      const job = { url, title: cached?.title || 'Getting video details…', author: cached?.author || '', thumbnail: cached?.thumbnail || '', duration: cached?.duration || 0, platform: new URL(url).hostname.includes('youtu') ? 'YouTube' : 'TikTok', id: crypto.randomUUID(), options: selected, folder: store.settings.folder, status: 'queued', progress: 0, createdAt: Date.now(), stage: 'Waiting' };
+      store.jobs.unshift(job); ids.push(job.id);
+    }
+    if (!ids.length) throw new Error('These downloads are already in your queue.');
+    store.settings.defaultOptions = selected;
+    save(); schedule(); return { ids, skipped: lines.length - ids.length };
+  });
+  handle('extract-audio', (id, input) => {
+    const source = store.jobs.find(job => job.id === id);
+    if (!source || source.status !== 'completed' || source.options.mode !== 'video') throw new Error('Choose a completed video in your library.');
+    if (!source.file || !fs.existsSync(source.file)) throw new Error('The original video was moved or deleted. Restore it and try again.');
+    const extraction = audioOptions(input);
+    const pending = store.jobs.find(job => job.type === 'extraction' && job.parentId === id && ['queued', 'downloading', 'paused'].includes(job.status) && JSON.stringify(job.extraction) === JSON.stringify(extraction));
+    if (pending) throw new Error('That audio export is already in your queue.');
+    const job = { id: crypto.randomUUID(), type: 'extraction', parentId: id, sourceFile: source.file, url: source.url, title: source.title, author: source.author, thumbnail: source.thumbnail, duration: source.duration, platform: 'Local audio', extraction, options: { ...validateOptions(), mode: 'audio', audioFormat: extraction.format }, folder: store.settings.folder, status: 'queued', progress: 0, createdAt: Date.now(), stage: 'Waiting' };
     store.jobs.unshift(job); save(); schedule(); return job.id;
   });
   handle('action', (id, action) => {
     const job = store.jobs.find(j => j.id === id); if (!job) throw new Error('Download not found.');
     const child = running.get(id);
+    if (action === 'favorite') { job.favorite = !job.favorite; save(); emit(); return snapshot(); }
+    if (child && ['retry', 'remove'].includes(action)) throw new Error('The task is still stopping. Try again in a moment.');
     if (action === 'pause' && ['downloading', 'queued'].includes(job.status)) { job.status = 'paused'; job.stage = 'Paused'; if (child) terminate(child); }
     if (action === 'cancel' && ['queued', 'downloading', 'paused'].includes(job.status)) { job.status = 'cancelled'; job.stage = 'Cancelled'; if (child) terminate(child); }
     if (action === 'retry' && ['failed', 'cancelled', 'paused'].includes(job.status) && !child) { job.status = 'queued'; job.error = ''; job.stage = 'Waiting'; }
@@ -148,7 +211,7 @@ function registerIPC() {
   });
   handle('open-folder', async () => { fs.mkdirSync(store.settings.folder, { recursive: true }); const error = await shell.openPath(store.settings.folder); if (error) throw new Error(error); });
   handle('settings', value => {
-    store.settings = { ...store.settings, concurrent: [1, 2, 3].includes(value.concurrent) ? value.concurrent : store.settings.concurrent, notifications: typeof value.notifications === 'boolean' ? value.notifications : store.settings.notifications, cookies: ['none', 'chrome', 'firefox', 'safari', 'edge'].includes(value.cookies) ? value.cookies : store.settings.cookies, defaultOptions: validateOptions(value.defaultOptions || store.settings.defaultOptions) };
+    store.settings = { ...store.settings, fragments: [1, 4, 8].includes(value.fragments) ? value.fragments : store.settings.fragments, concurrent: [1, 2, 3].includes(value.concurrent) ? value.concurrent : store.settings.concurrent, notifications: typeof value.notifications === 'boolean' ? value.notifications : store.settings.notifications, cookies: ['none', 'chrome', 'firefox', 'safari', 'edge'].includes(value.cookies) ? value.cookies : store.settings.cookies, defaultOptions: validateOptions(value.defaultOptions || store.settings.defaultOptions) };
     save(); schedule(); return snapshot();
   });
   handle('clear-history', async () => {
@@ -170,7 +233,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { if (!win) createWindow(); win.show(); win.focus(); });
   app.whenReady().then(() => {
-    const defaults = { folder: path.join(app.getPath('downloads'), 'AnyLoader'), concurrent: 2, notifications: true, cookies: 'none', defaultOptions: validateOptions() };
+    const defaults = { folder: path.join(app.getPath('downloads'), 'AnyLoader'), fragments: 4, concurrent: 2, notifications: true, cookies: 'none', defaultOptions: validateOptions() };
     try { store = JSON.parse(fs.readFileSync(storePath(), 'utf8')); if (!Array.isArray(store.jobs) || !store.settings) throw new Error('Invalid data'); store.settings = { ...defaults, ...store.settings }; }
     catch { if (fs.existsSync(storePath())) fs.copyFileSync(storePath(), `${storePath()}.recovery-${Date.now()}`); store = { settings: defaults, jobs: [] }; }
     for (const job of store.jobs) if (['downloading', 'queued'].includes(job.status)) { job.status = 'paused'; job.stage = 'Paused after restart'; }
@@ -189,7 +252,7 @@ else {
       e.preventDefault(); quitting = true;
       for (const job of store.jobs) if (['downloading', 'queued'].includes(job.status)) { job.status = 'paused'; job.stage = 'Paused after quit'; }
       for (const child of [...running.values(), ...probes]) terminate(child);
-      save(); setTimeout(() => app.quit(), 700);
+      save(); setTimeout(() => app.quit(), 2300);
     } else { quitting = true; if (store) save(); }
   });
 }

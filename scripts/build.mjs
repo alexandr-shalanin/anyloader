@@ -1,6 +1,6 @@
 import { packager } from '@electron/packager';
 import sharp from 'sharp';
-import { mkdir, access, mkdtemp, cp, writeFile } from 'node:fs/promises';
+import { mkdir, access, mkdtemp, cp, writeFile, readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,7 +18,8 @@ for (const folder of paths) {
   execFileSync('xattr', ['-cr', app]);
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' });
   execFileSync('codesign', ['--verify', '--deep', '--strict', app], { stdio: 'inherit' });
-  const zip = `dist/AnyLoader-1.0.0-mac-${process.arch}.zip`;
+  const version = JSON.parse(await readFile('package.json', 'utf8')).version;
+  const zip = `dist/AnyLoader-${version}-mac-${process.arch}.zip`;
   execFileSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, zip]);
   await cp(folder, `dist/${path.basename(folder)}`, { recursive: true, force: true });
   await writeFile('dist/build.json', JSON.stringify({ app, zip: path.resolve(zip), arch: process.arch }, null, 2));

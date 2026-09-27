@@ -17,6 +17,7 @@ try {
   for (const mode of ['video', 'audio']) {
     await page.locator(`[data-mode="${mode}"]`).click();
     if (mode === 'audio') await page.locator('#audio-format').selectOption('mp3');
+    if (mode === 'video' && process.env.TEST_CONTAINER) await page.locator('#video-container').selectOption(process.env.TEST_CONTAINER);
     await page.locator('#url').fill(url);
     await page.locator('#download-button').click();
     const deadline = Date.now() + 180000;
@@ -30,9 +31,16 @@ try {
     const job = state.jobs.find(j => j.options.mode === mode);
     assert.ok(job, 'Expected the download to enter the queue');
     assert.equal(job.status, 'completed', job.error);
+    assert.notEqual(job.title, 'Getting video details…', 'Metadata must arrive during the same download pass');
     const info = JSON.parse(execFileSync('vendor/ffprobe', ['-v', 'quiet', '-show_streams', '-of', 'json', job.file], { encoding: 'utf8' }));
     assert.ok(info.streams.some(s => s.codec_type === 'audio'));
-    if (mode === 'video') assert.ok(info.streams.some(s => s.codec_type === 'video'));
+    if (mode === 'video') {
+      assert.ok(info.streams.some(s => s.codec_type === 'video'));
+      if (process.env.TEST_CONTAINER === 'mp4') {
+        assert.equal(info.streams.find(s => s.codec_type === 'video').codec_name, 'h264');
+        assert.equal(info.streams.find(s => s.codec_type === 'audio').codec_name, 'aac');
+      }
+    }
     else assert.ok(info.streams.every(s => s.codec_type === 'audio'));
     console.log(`PASS live ${mode}: ${job.title} (${job.size} bytes)`);
   }

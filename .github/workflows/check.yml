@@ -13,4 +13,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer/app.js
+      - run: node --check src/main.cjs && node --check src/preload.cjs && node --check src/local-media.cjs && node --check src/renderer/app.js

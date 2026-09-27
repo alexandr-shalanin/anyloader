@@ -23,6 +23,14 @@ test('audio extraction requests best source and explicit format', () => {
   const args = downloadArgs({ url: 'https://youtu.be/test', options: { mode: 'audio', audioFormat: 'mp3' } }, '/tmp/downloads');
   assert.ok(args.includes('--extract-audio')); assert.equal(args[args.indexOf('--audio-format') + 1], 'mp3'); assert.ok(!args.includes('--merge-output-format'));
 });
+test('editing MP4 never falls back to an incompatible codec', () => {
+  const args = downloadArgs({ url: 'https://youtu.be/test', options: { container: 'mp4' } }, '/tmp');
+  const choices = args[args.indexOf('-f') + 1].split('/');
+  assert.ok(choices.every(choice => choice.includes("vcodec~='^(avc1|h264)'") && choice.includes("acodec~='^(mp4a|aac)'")));
+  assert.ok(args.includes('--remux-video'));
+  assert.ok(args.includes('--no-simulate'));
+  assert.ok(args.some(arg => arg.startsWith('before_dl:__META__')));
+});
 test('untrusted options never become executable arguments', () => { assert.deepEqual(validateOptions({ mode: '--exec', quality: '9999;rm', container: '../../bad', audioFormat: '--exec' }), { mode: 'video', quality: 'best', container: 'mkv', audioFormat: 'best' }); });
 test('parses progress including unknown size, completion and malformed data', () => {
   assert.equal(parseProgress('__PROGRESS__{"downloaded_bytes":50,"total_bytes":100,"speed":25}').progress, 50);

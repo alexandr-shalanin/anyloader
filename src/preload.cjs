@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('anyloader', {
   clipboard: () => ipcRenderer.invoke('clipboard'),
   inspect: url => ipcRenderer.invoke('inspect', url),
   enqueue: (url, options) => ipcRenderer.invoke('enqueue', url, options),
+  extractAudio: (id, options) => ipcRenderer.invoke('extract-audio', id, options),
   action: (id, action) => ipcRenderer.invoke('action', id, action),
   chooseFolder: () => ipcRenderer.invoke('choose-folder'),
   openFolder: () => ipcRenderer.invoke('open-folder'),

@@ -20,16 +20,18 @@ function validateOptions(value = {}) {
 }
 function downloadArgs(job, folder) {
   const o = validateOptions(job.options);
-  const args = ['--newline', '--progress', '--no-playlist', '--continue', '--no-overwrites', '--windows-filenames', '--trim-filenames', '180', '--paths', folder,
+  const args = ['--newline', '--progress', '--no-simulate', '--no-playlist', '--match-filter', '!is_live', '--continue', '--no-overwrites', '--windows-filenames', '--trim-filenames', '180', '--paths', folder,
+    '--print', 'before_dl:__META__{"title":%(title|null)j,"author":%(uploader|null)j,"duration":%(duration|null)j,"thumbnail":%(thumbnail|null)j,"height":%(height|null)j}',
     '--output', `%(title).120B [%(id)s] [${o.mode === 'audio' ? `audio-${o.audioFormat}` : `video-${o.quality}-${o.container}`}].%(ext)s`, '--progress-template', 'download:__PROGRESS__%(progress)j', '--print', 'after_move:__FILE__%(filepath)j'];
   if (o.mode === 'audio') args.push('-f', 'bestaudio/best', '--extract-audio', '--audio-format', o.audioFormat, '--audio-quality', '0');
   else {
     const cap = o.quality === 'best' ? '' : `[height<=${o.quality}]`;
     // MKV preserves the best source codecs. MP4 prefers widely playable H.264/AAC.
     const format = o.container === 'mp4'
-      ? `bestvideo${cap}[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best${cap}[ext=mp4]/bestvideo${cap}+bestaudio/best${cap}`
+      ? `bestvideo${cap}[ext=mp4][vcodec~='^(avc1|h264)']+bestaudio[acodec~='^(mp4a|aac)']/best${cap}[ext=mp4][vcodec~='^(avc1|h264)'][acodec~='^(mp4a|aac)']`
       : `bestvideo${cap}+bestaudio/best${cap}`;
     args.push('-f', format, '--merge-output-format', o.container);
+    if (o.container === 'mp4') args.push('--remux-video', 'mp4');
   }
   return [...args, '--', validateURL(job.url)];
 }

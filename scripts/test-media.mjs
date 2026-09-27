@@ -29,6 +29,8 @@ try {
     child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
     const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
     assert.equal(code, 0, stderr);
+    const metadata = JSON.parse(stdout.split('\n').find(l => l.startsWith('__META__')).slice(8));
+    assert.ok(metadata.title, 'Expected metadata from the download pass');
     const file = JSON.parse(stdout.split('\n').find(l => l.startsWith('__FILE__')).slice(8));
     assert.ok(existsSync(file));
     assert.ok(stdout.split('\n').some(l => parseProgress(l)), 'Expected machine-readable live progress');

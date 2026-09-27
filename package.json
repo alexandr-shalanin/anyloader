@@ -1,7 +1,7 @@
 {
   "name": "anyloader",
   "productName": "AnyLoader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A little retro. A lot of resolution. YouTube and TikTok downloads for Mac.",
   "author": "alexandr-shalanin",
   "license": "MIT",
@@ -13,6 +13,7 @@
     "test": "node --test test/*.test.cjs",
     "test:ui": "node scripts/smoke.mjs",
     "test:media": "node scripts/test-media.mjs",
+    "test:editor": "node scripts/test-editor.mjs",
     "build": "node scripts/build.mjs"
   },
   "devDependencies": {
