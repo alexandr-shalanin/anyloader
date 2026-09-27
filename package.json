@@ -1,0 +1,28 @@
+{
+  "name": "anyloader",
+  "productName": "AnyLoader",
+  "version": "1.0.0",
+  "description": "A little retro. A lot of resolution. YouTube and TikTok downloads for Mac.",
+  "author": "alexandr-shalanin",
+  "license": "MIT",
+  "private": true,
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "setup": "node scripts/setup.mjs",
+    "test": "node --test test/*.test.cjs",
+    "test:ui": "node scripts/smoke.mjs",
+    "test:media": "node scripts/test-media.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.4.5",
+    "playwright": "1.63.0",
+    "sharp": "0.35.4"
+  },
+  "optionalDependencies": {
+    "@deno/darwin-arm64": "2.9.6",
+    "@deno/darwin-x64": "2.9.6"
+  }
+}
